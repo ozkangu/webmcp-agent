@@ -4,7 +4,9 @@
 
 WebMCP, bir AI agent'in frontend uygulamanin fonksiyonlarini **DOM'a dokunmadan**, tarayici icinde calisan tool handler'lar uzerinden kontrol etmesini saglayan bir mimaridir. Agent, LLM karar mekanizmasiyla hangi tool'u cagirdigini belirler; tool cagrilari WebSocket uzerinden frontend'e iletilir; frontend kendi store'unu guncelleyerek UI'i render eder; sonucu geri gonderir.
 
-Google'in onerdi WebMCP standardinin custom WebSocket implementasyonu.
+**Frontend tek kaynak (source of truth)**: Tool tanimlari frontend'de JSON Schema olarak tutulur. Backend'de statik tool kodu yoktur — agent, frontend'in gonderdigi manifest'ten dinamik olarak olusturulur.
+
+Google'in onerdigi WebMCP standardinin custom WebSocket implementasyonu.
 
 ---
 
@@ -16,11 +18,14 @@ graph TB
         UI["React UI Components<br/>Header, SearchForm, FlightCard,<br/>CartPanel, ChatPanel, PassengerForm"]
         Store["Zustand Store<br/>form, cart, results,<br/>passengerForm, currentView"]
         Bridge["WebMCP Bridge<br/>createWebMCPBridge()<br/>14 tool handler"]
-        Hook["useAgentConnection()<br/>WebSocket yonetimi"]
+        Manifest["TOOL_MANIFEST<br/>14 JSON Schema tanimi<br/>bridge.ts"]
+        Hook["useAgentConnection()<br/>WebSocket yonetimi<br/>+ manifest gonderimi"]
         Service["flightService<br/>Mock arama motoru"]
 
         UI -->|"useAppStore()"| Store
         Hook -->|"tool_call geldi"| Bridge
+        Hook -->|"connected geldi"| Manifest
+        Manifest -->|"tool_manifest mesaji"| Hook
         Bridge -->|"store.setFormField()<br/>store.addToCart()<br/>store.setResults()"| Store
         Bridge -->|"flightService.search()"| Service
         Service -->|"SearchResult"| Bridge
@@ -31,13 +36,14 @@ graph TB
         FastAPI["FastAPI<br/>main.py"]
         WSHandler["WebSocket Handler<br/>websocket_handler.py"]
         BridgePy["FrontendToolBridge<br/>bridge.py"]
-        AgnoAgent["Agno Agent<br/>GPT-4o-mini<br/>agent.py"]
-        Tools["Agno Tools<br/>12 tool fonksiyonu<br/>tools/*.py"]
+        ToolFactory["Tool Factory<br/>tool_factory.py<br/>Manifest → Agno Function"]
+        AgnoAgent["Agno Agent<br/>GPT-4o-mini<br/>agent.py (factory)"]
 
         FastAPI -->|"/ws/agent"| WSHandler
+        WSHandler -->|"tool_manifest alindi"| ToolFactory
+        ToolFactory -->|"Function[] listesi"| AgnoAgent
         WSHandler -->|"user_message"| AgnoAgent
-        AgnoAgent -->|"tool cagrisi"| Tools
-        Tools -->|"bridge.call_frontend()"| BridgePy
+        AgnoAgent -->|"tool cagrisi"| BridgePy
         BridgePy -->|"tool_call JSON"| WSHandler
     end
 
@@ -46,6 +52,30 @@ graph TB
     style Browser fill:#0d1117,stroke:#30363d,color:#e6edf3
     style Server fill:#161b22,stroke:#30363d,color:#e6edf3
 ```
+
+---
+
+## WebSocket Handshake Akisi
+
+Frontend baglandiginda, agent olusturulmadan once tool manifest degis-tokus edilir:
+
+```mermaid
+sequenceDiagram
+    participant FE as Frontend
+    participant BE as Backend
+
+    FE->>BE: WebSocket connect
+    BE->>FE: {"type": "connected"}
+    FE->>BE: {"type": "tool_manifest", "tools": [...14 JSON Schema...]}
+    Note over BE: create_tools_from_manifest()<br/>create_agent(tools)
+    BE->>FE: {"type": "tools_registered", "count": 14}
+    Note over FE,BE: Normal akis baslar<br/>(user_message, tool_call, tool_result, ...)
+```
+
+Bu sayede:
+- Frontend'e yeni tool eklendiginde backend kodu degismez
+- Agent, her baglantida frontend'in sundugu tool'larla olusturulur
+- Backend'de statik tool dosyalari yoktur
 
 ---
 
@@ -74,9 +104,9 @@ sequenceDiagram
     BE-->>WS: {"type":"agent_thinking"}
     WS-->>CP: isThinking = true
 
-    AG->>AG: LLM karar verir:<br/>fill_search_form tool'unu cagir
+    AG->>AG: LLM karar verir:<br/>fillSearchForm tool'unu cagir
 
-    AG->>BPy: fill_search_form(origin="ESB", destination="IST")
+    AG->>BPy: proxy_entrypoint(origin="ESB", destination="IST")
     BPy->>BE: tool_call JSON olustur
     BE->>WS: {"type":"tool_call","callId":"uuid-1",<br/>"toolName":"fillSearchForm",<br/>"params":{"origin":"ESB","destination":"IST"}}
 
@@ -90,9 +120,9 @@ sequenceDiagram
     BE->>BPy: bridge.resolve("uuid-1", result)
     BPy-->>AG: Tool sonucu
 
-    AG->>AG: LLM karar verir:<br/>click_button("search-btn")
+    AG->>AG: LLM karar verir:<br/>clickButton("search-btn")
 
-    AG->>BPy: click_button(button_id="search-btn")
+    AG->>BPy: proxy_entrypoint(buttonId="search-btn")
     BPy->>BE: tool_call JSON
     BE->>WS: {"type":"tool_call","callId":"uuid-2",<br/>"toolName":"clickButton",<br/>"params":{"buttonId":"search-btn"}}
 
@@ -122,21 +152,22 @@ Asagidaki diyagram, her katmanin birbirine **ne gonderdigi** ve **ne aldigi**ni 
 ┌─────────────────────────────────────────────────────────────────────────────────┐
 │                              TARAYICI (React)                                   │
 │                                                                                 │
-│  ┌──────────┐    ┌──────────────────┐    ┌──────────────────┐    ┌───────────┐ │
-│  │  ChatPanel│───>│useAgentConnection│───>│  WebMCP Bridge   │───>│  Zustand   │ │
-│  │          │    │                  │    │                  │    │  Store     │ │
-│  │  Mesaj   │    │  WS baglantisi   │    │  Tool handler'lar│    │           │ │
-│  │  gonder  │    │  yonetir         │    │  calistirir      │    │  State    │ │
-│  │          │    │                  │    │                  │    │  gunceller │ │
-│  └──────────┘    └────────┬─────────┘    └──────────────────┘    └─────┬─────┘ │
-│                           │                                           │        │
-│                           │ WebSocket                                 │ re-    │
-│                           │                                           │ render │
-│                           │                                           ▼        │
-│                           │                                    ┌───────────┐   │
-│                           │                                    │    UI     │   │
-│                           │                                    │Components │   │
-│                           │                                    └───────────┘   │
+│  ┌──────────┐    ┌──────────────────┐    ┌──────────────────┐    ┌───────────┐  │
+│  │ ChatPanel│───>│useAgentConnection│───>│  WebMCP Bridge   │───>│  Zustand  │  │
+│  │          │    │                  │    │                  │    │  Store    │  │
+│  │  Mesaj   │    │  WS baglantisi   │    │  Tool handler'lar│    │           │  │
+│  │  gonder  │    │  yonetir         │    │  calistirir      │    │  State    │  │
+│  │          │    │  + tool_manifest │    │                  │    │  gunceller│  │
+│  │          │    │    gonderir      │    │  TOOL_MANIFEST   │    │           │  │
+│  └──────────┘    └────────┬─────────┘    │  JSON Schema x14 │    └─────┬─────┘  │ 
+│                           │              └──────────────────┘          │        │
+│                           │ WebSocket                                  │ re-    │
+│                           │                                            │ render │
+│                           │                                            ▼        │
+│                           │                                    ┌───────────┐    │
+│                           │                                    │    UI     │    │
+│                           │                                    │Components │    │
+│                           │                                    └───────────┘    │
 └───────────────────────────┼─────────────────────────────────────────────────────┘
                             │
               ══════════════╪══════════════  WebSocket (ws://localhost:8000/ws/agent)
@@ -148,44 +179,82 @@ Asagidaki diyagram, her katmanin birbirine **ne gonderdigi** ve **ne aldigi**ni 
 │  │         WebSocket Handler                    │                                │
 │  │         websocket_handler.py                 │                                │
 │  │                                              │                                │
-│  │  - user_message → Agent'a ilet              │                                │
-│  │  - tool_result  → Bridge'e resolve et       │                                │
-│  │  - tool_call    → Frontend'e gonder (bridge)│                                │
-│  └──────────────┬───────────────────────────────┘                                │
-│                 │                                                                │
-│     ┌───────────┴───────────┐         ┌────────────────────────┐                │
-│     │   Agno Agent          │────────>│  FrontendToolBridge    │                │
-│     │   agent.py            │         │  bridge.py             │                │
-│     │                       │         │                        │                │
-│     │   GPT-4o-mini LLM    │         │  call_frontend()       │                │
-│     │   12 tool tanimi      │         │  - JSON olustur        │                │
-│     │   Turkce instruction  │         │  - WS'den gonder       │                │
-│     │                       │         │  - Future ile bekle    │                │
-│     └───────────────────────┘         │  - Sonucu don          │                │
-│               │                       └────────────────────────┘                │
-│               │ Tool cagrilari                                                  │
-│     ┌─────────┴─────────────────────────────────────────────┐                   │
-│     │                    tools/                              │                   │
-│     │  ┌──────────────┐ ┌──────────────┐ ┌──────────────┐  │                   │
-│     │  │ form_tools   │ │flight_tools  │ │passenger_    │  │                   │
-│     │  │              │ │              │ │tools         │  │                   │
-│     │  │fill_search   │ │search_flights│ │              │  │                   │
-│     │  │clear_search  │ │select_flight │ │fill_passenger│  │                   │
-│     │  │click_button  │ │add_to_cart   │ │_form         │  │                   │
-│     │  │              │ │remove_cart   │ │              │  │                   │
-│     │  │              │ │get_cart      │ └──────────────┘  │                   │
-│     │  └──────────────┘ └──────────────┘                    │                   │
-│     │  ┌──────────────┐                                     │                   │
-│     │  │navigation_   │  Her tool: bridge.call_frontend()   │                   │
-│     │  │tools         │  ile frontend'e delege eder         │                   │
-│     │  │              │                                     │                   │
-│     │  │navigate_to   │                                     │                   │
-│     │  │get_state     │                                     │                   │
-│     │  │get_airports  │                                     │                   │
-│     │  └──────────────┘                                     │                   │
-│     └───────────────────────────────────────────────────────┘                   │
-└─────────────────────────────────────────────────────────────────────────────────┘
+│  │  - tool_manifest → Tool Factory + Agent      │                                │
+│  │  - user_message  → Agent'a ilet              │                                │
+│  │  - tool_result   → Bridge'e resolve et       │                                │
+│  │  - user_action   → Agent'a context olarak    │                                │
+│  └─────────┬──────────────────────┬─────────────┘                                │
+│            │                      │                                              │
+│  ┌─────────┴───────────┐  ┌──────┴───────────────────┐                          │
+│  │ Tool Factory         │  │  FrontendToolBridge      │                          │
+│  │ tool_factory.py      │  │  bridge.py               │                          │
+│  │                      │  │                          │                          │
+│  │ Manifest → Agno      │  │  call_frontend()         │                          │
+│  │ Function proxy'leri  │  │  - JSON olustur          │                          │
+│  │                      │  │  - WS'den gonder         │                          │
+│  │ skip_entrypoint_     │  │  - Future ile bekle      │                          │
+│  │ processing=True      │  │  - Sonucu don            │                          │
+│  └─────────┬────────────┘  └─────────────────────────┘                          │
+│            │                      ▲                                              │
+│  ┌─────────┴───────────┐         │                                              │
+│  │   Agno Agent         │─────────┘                                              │
+│  │   agent.py (factory) │  Her tool cagrisi                                      │
+│  │                      │  proxy_entrypoint() →                                  │
+│  │   GPT-4o-mini LLM   │  bridge.call_frontend()                                │
+│  │   Per-connection     │                                                        │
+│  │   Turkce instruction │                                                        │
+│  └──────────────────────┘                                                        │
+└──────────────────────────────────────────────────────────────────────────────────┘
 ```
+
+---
+
+## Dinamik Tool Factory Mimarisi
+
+Backend'de statik tool dosyalari yoktur. Tum tool'lar frontend manifest'inden dinamik olarak olusturulur:
+
+```mermaid
+graph LR
+    subgraph Frontend
+        M["TOOL_MANIFEST<br/>14 JSON Schema"]
+    end
+
+    subgraph Backend
+        TF["tool_factory.py<br/>create_tools_from_manifest()"]
+        AF["agent.py<br/>create_agent(tools)"]
+        Proxy["proxy_entrypoint(**kwargs)<br/>→ bridge.call_frontend()"]
+
+        TF -->|"Function(name, desc,<br/>parameters, entrypoint,<br/>skip_entrypoint_processing=True)"| AF
+        AF -->|"Agent tool cagrisi"| Proxy
+    end
+
+    M -->|"tool_manifest<br/>WebSocket"| TF
+
+    style Frontend fill:#0f2a1f,stroke:#22c55e,color:#e6edf3
+    style Backend fill:#1a1a2e,stroke:#6366f1,color:#e6edf3
+```
+
+**Proxy entrypoint pattern**:
+
+```python
+# tool_factory.py
+def create_proxy_tool(entry):
+    tool_name = entry["name"]
+
+    async def proxy_entrypoint(**kwargs) -> str:
+        result = await bridge.call_frontend(tool_name, kwargs)
+        return json.dumps(result, ensure_ascii=False)
+
+    return Function(
+        name=tool_name,
+        description=entry.get("description", ""),
+        parameters=entry.get("parameters", {...}),
+        entrypoint=proxy_entrypoint,
+        skip_entrypoint_processing=True,  # JSON Schema olduğu gibi LLM'e sunulur
+    )
+```
+
+`skip_entrypoint_processing=True` sayesinde proxy fonksiyonunun `**kwargs` imzasi yerine frontend'den gelen zengin JSON Schema parametreleri (enum, description, required) LLM'e sunulur.
 
 ---
 
@@ -197,7 +266,8 @@ Tum iletisim JSON formatinda, tek bir WebSocket kanali uzerinden gerceklesir.
 
 | type | Aciklama | Ek alanlar |
 |------|----------|------------|
-| `connected` | Baglanti kuruldu, tool listesi | `tools: ToolDefinition[]` |
+| `connected` | Baglanti kuruldu, manifest bekleniyor | - |
+| `tools_registered` | Manifest islendi, agent hazir | `count: number` |
 | `tool_call` | Agent bir tool cagirdi | `callId`, `toolName`, `params` |
 | `agent_thinking` | Agent dusunuyor | - |
 | `agent_response` | Agent cevap verdi | `message: string` |
@@ -207,22 +277,45 @@ Tum iletisim JSON formatinda, tek bir WebSocket kanali uzerinden gerceklesir.
 
 | type | Aciklama | Ek alanlar |
 |------|----------|------------|
+| `tool_manifest` | Tool tanimlari (handshake) | `tools: ToolManifestEntry[]` |
 | `user_message` | Kullanici mesaji | `message: string` |
 | `tool_result` | Tool calisma sonucu | `callId`, `result: object` |
+| `user_action` | Kullanici UI degisikligi | `changes: string[]` |
 
 ### Ornek Mesaj Akisi
 
 ```json
 // 1. Backend → Frontend: Baglanti
-{"type": "connected", "tools": [{"name": "fillSearchForm", ...}, ...]}
+{"type": "connected"}
 
-// 2. Frontend → Backend: Kullanici mesaji
+// 2. Frontend → Backend: Tool manifest
+{
+  "type": "tool_manifest",
+  "tools": [
+    {
+      "name": "fillSearchForm",
+      "description": "Arama formunu doldurur...",
+      "parameters": {
+        "type": "object",
+        "properties": {
+          "origin": {"type": "string", "description": "Kalkis havalimani IATA kodu"},
+          "destination": {"type": "string", "description": "Varis havalimani IATA kodu"}
+        }
+      }
+    }
+  ]
+}
+
+// 3. Backend → Frontend: Manifest islendi
+{"type": "tools_registered", "count": 14}
+
+// 4. Frontend → Backend: Kullanici mesaji
 {"type": "user_message", "message": "Ankara'dan Istanbul'a ucus bul"}
 
-// 3. Backend → Frontend: Agent dusunuyor
+// 5. Backend → Frontend: Agent dusunuyor
 {"type": "agent_thinking"}
 
-// 4. Backend → Frontend: Tool cagrisi
+// 6. Backend → Frontend: Tool cagrisi
 {
   "type": "tool_call",
   "callId": "550e8400-e29b-41d4-a716-446655440000",
@@ -230,14 +323,14 @@ Tum iletisim JSON formatinda, tek bir WebSocket kanali uzerinden gerceklesir.
   "params": {"origin": "ESB", "destination": "IST"}
 }
 
-// 5. Frontend → Backend: Tool sonucu
+// 7. Frontend → Backend: Tool sonucu
 {
   "type": "tool_result",
   "callId": "550e8400-e29b-41d4-a716-446655440000",
-  "result": {"success": true, "form": {"origin": "ESB", "destination": "IST", ...}}
+  "result": {"success": true, "data": {"form": {"origin": "ESB", "destination": "IST"}}}
 }
 
-// 6. Backend → Frontend: Agent cevabi
+// 8. Backend → Frontend: Agent cevabi
 {"type": "agent_response", "message": "Formu doldurdum, arama yapiyorum..."}
 ```
 
@@ -250,9 +343,9 @@ Frontend ve backend'de **ikiz bridge** yapisi vardir. Her tool cagrisi iki bridg
 ```mermaid
 graph LR
     subgraph Backend
-        Tool["Agno Tool<br/>fill_search_form()"]
+        Proxy["Proxy Entrypoint<br/>(**kwargs) → str"]
         BPy["FrontendToolBridge<br/>(Python)"]
-        Tool -->|"bridge.call_frontend(<br/>'fillSearchForm', params)"| BPy
+        Proxy -->|"bridge.call_frontend(<br/>'fillSearchForm', params)"| BPy
     end
 
     subgraph Frontend
@@ -275,6 +368,7 @@ graph LR
 **Frontend bridge** (`bridge.ts`):
 - `handleToolCall(name, params)` → Ilgili handler'i calistirir, store'u gunceller, sonucu doner
 - Her handler dogrudan Zustand store action'larini cagirir
+- `TOOL_MANIFEST` → 14 tool'un JSON Schema tanimlari (backend'e handshake'te gonderilir)
 
 ---
 
@@ -282,71 +376,36 @@ graph LR
 
 ```mermaid
 graph TD
-    Agent["Agno Agent<br/>12 Tool"]
+    Manifest["TOOL_MANIFEST<br/>14 JSON Schema<br/>(bridge.ts)"]
+    Factory["Tool Factory<br/>create_tools_from_manifest()<br/>(tool_factory.py)"]
+    Agent["Agno Agent<br/>14 Proxy Function<br/>(per-connection)"]
 
-    subgraph FormTools["form_tools.py"]
-        T1["fill_search_form"]
-        T2["clear_search_form"]
-        T3["click_button"]
-    end
+    Manifest -->|"WebSocket<br/>handshake"| Factory
+    Factory -->|"Function[]"| Agent
 
-    subgraph FlightTools["flight_tools.py"]
-        T4["search_flights"]
-        T5["select_flight"]
-        T6["add_to_cart"]
-        T7["remove_from_cart"]
-        T8["get_cart"]
-    end
-
-    subgraph PassengerTools["passenger_tools.py"]
-        T9["fill_passenger_form"]
-    end
-
-    subgraph NavTools["navigation_tools.py"]
-        T10["navigate_to"]
-        T11["get_current_state"]
-        T12["get_available_airports"]
-    end
-
-    Agent --> FormTools
-    Agent --> FlightTools
-    Agent --> PassengerTools
-    Agent --> NavTools
-
-    subgraph FrontendHandlers["Frontend Bridge Handlers"]
+    subgraph FrontendHandlers["Frontend Bridge Handlers (bridge.ts)"]
         H1["fillSearchForm → store.setFormField()"]
         H2["clearSearchForm → store.clearForm()"]
-        H3["clickButton → submitSearchForm / navigateTo"]
-        H4["searchFlights → flightService.search() + store.setResults()"]
-        H5["selectFlight → store.selectFlight()"]
-        H6["addToCart → store.addToCart()"]
-        H7["removeFromCart → store.removeFromCart()"]
-        H8["getCart → store.cart oku"]
-        H9["fillPassengerForm → store.setPassengerField()"]
+        H3["submitSearchForm → flightService.search() + store.setResults()"]
+        H4["fillPassengerForm → store.setPassengerField()"]
+        H5["searchFlights → flightService.search() + store.setResults()"]
+        H6["selectFlight → store.selectFlight()"]
+        H7["addToCart → store.addToCart()"]
+        H8["removeFromCart → store.removeFromCart()"]
+        H9["getCart → store.cart oku"]
         H10["navigateTo → store.setView()"]
-        H11["getCurrentState → tum state oku"]
-        H12["getAvailableAirports → AIRPORTS sabiti"]
+        H11["clickButton → submitSearchForm / navigateTo"]
+        H12["getCurrentState → tum state oku"]
+        H13["getAvailableActions → view bazli aksiyon listesi"]
+        H14["getAvailableAirports → AIRPORTS sabiti"]
     end
 
-    T1 -.->|WebSocket| H1
-    T2 -.->|WebSocket| H2
-    T3 -.->|WebSocket| H3
-    T4 -.->|WebSocket| H4
-    T5 -.->|WebSocket| H5
-    T6 -.->|WebSocket| H6
-    T7 -.->|WebSocket| H7
-    T8 -.->|WebSocket| H8
-    T9 -.->|WebSocket| H9
-    T10 -.->|WebSocket| H10
-    T11 -.->|WebSocket| H11
-    T12 -.->|WebSocket| H12
+    Agent -.->|"proxy_entrypoint()<br/>→ bridge.call_frontend()<br/>→ WebSocket"| FrontendHandlers
 
-    style FormTools fill:#1e293b,stroke:#6366f1,color:#e6edf3
-    style FlightTools fill:#1e293b,stroke:#3b82f6,color:#e6edf3
-    style PassengerTools fill:#1e293b,stroke:#f59e0b,color:#e6edf3
-    style NavTools fill:#1e293b,stroke:#22c55e,color:#e6edf3
     style FrontendHandlers fill:#0f2a1f,stroke:#22c55e,color:#e6edf3
 ```
+
+Not: `setFormField` handler'i manifest'e dahil degildir — dusuk seviyeli, agent'in dogrudan kullanmasi gerekmiyor (`fillSearchForm` yeterli).
 
 ---
 
@@ -382,7 +441,7 @@ Agent "Ankara → Istanbul formu doldur" dediginde, arka planda su zincir calisi
 
 ```
 Agent (LLM)
-  → fill_search_form(origin="ESB", destination="IST")        [Python tool]
+  → proxy_entrypoint(origin="ESB", destination="IST")        [Agno Function proxy]
     → bridge.call_frontend("fillSearchForm", {...})           [Python bridge]
       → WebSocket mesaj                                       [Ag]
         → useAgentConnection ws.onmessage                     [React hook]
@@ -392,22 +451,7 @@ Agent (LLM)
               → SearchForm re-render (select'ler guncellenir) [React]
 ```
 
-Bridge handler'in kodu:
-
-```ts
-// webmcp/bridge.ts
-fillSearchForm: async ({ origin, destination, date, cabinClass, passengers, tripType }) => {
-  if (origin) store.setFormField('origin', origin as string);
-  if (destination) store.setFormField('destination', destination as string);
-  if (date) store.setFormField('date', date as string);
-  if (cabinClass) store.setFormField('cabinClass', cabinClass as string);
-  if (passengers) store.setFormField('passengers', passengers as number);
-  if (tripType) store.setFormField('tripType', tripType as string);
-  return { success: true, form: store.form };
-},
-```
-
-### 3. WebSocket Hook: Baglanti ve Mesaj Yonlendirme
+### 3. WebSocket Hook: Baglanti, Manifest ve Mesaj Yonlendirme
 
 `useAgentConnection()` hook'u tum WebSocket yasam dongusunu yonetir:
 
@@ -429,8 +473,13 @@ export function useAgentConnection() {
 
       switch (data.type) {
         case 'connected':
-          // Bridge olustur
+          // Bridge olustur + tool manifest'i backend'e gonder
           bridgeRef.current = createWebMCPBridge(useAppStore.getState());
+          ws.send(JSON.stringify({ type: 'tool_manifest', tools: TOOL_MANIFEST }));
+          break;
+
+        case 'tools_registered':
+          console.log(`[WebMCP] Backend registered ${data.count} tools`);
           break;
 
         case 'tool_call':
@@ -459,7 +508,7 @@ export function useAgentConnection() {
 
 ### 4. Field Highlight: Agent Degisikliklerini Gorsellestirme
 
-Agent bir formu doldurunca, kullanici hangi alanlarin degistigini gorsek olarak gorur:
+Agent bir formu doldurunca, kullanici hangi alanlarin degistigini gorsel olarak gorur:
 
 ```ts
 // App.tsx
@@ -488,66 +537,47 @@ export function useFieldHighlight() {
 }
 ```
 
-Component'te kullanimi:
-
-```tsx
-// SearchForm.tsx - inputClass fonksiyonu
-const inputClass = (field: string) =>
-  `w-full rounded-[10px] px-3.5 py-[11px] text-sm ... ${
-    hl[field]
-      ? 'bg-dark-hover border-indigo-500 shadow-[0_0_16px_rgba(99,102,241,0.27)]'
-      : 'bg-dark-input border-dark-border'
-  }`;
-```
-
 Sonuc: Agent "origin" alanini doldurunca, input 1.2 saniye boyunca indigo border + glow efekti gosterir.
 
 ### 5. Yeni Tool Ekleme Ornegi
 
-Ornegin `getFlightDetails` adinda yeni bir tool eklemek istersek:
+Dinamik mimari sayesinde yeni tool eklemek artik **sadece frontend degisikligi** gerektirir:
 
-**Backend** - `tools/flight_tools.py`'a ekle:
-
-```python
-@tool(name="get_flight_details",
-      description="Bir ucusun detaylarini getir. offerId parametresi gerekli.")
-async def get_flight_details(offer_id: str) -> str:
-    result = await bridge.call_frontend("getFlightDetails", {"offerId": offer_id})
-    return json.dumps(result, ensure_ascii=False)
-```
-
-**Backend** - `tools/__init__.py`'a ekle:
-
-```python
-from .flight_tools import search_flights, select_flight, add_to_cart, remove_from_cart, get_cart, get_flight_details
-
-ALL_TOOLS = [
-    # ...mevcut tool'lar...
-    get_flight_details,
-]
-```
-
-**Backend** - `websocket_handler.py` TOOL_DEFINITIONS'a ekle:
-
-```python
-{"name": "getFlightDetails", "description": "Ucus detayi", "params": ["offerId"]},
-```
-
-**Frontend** - `webmcp/bridge.ts` handlers'a ekle:
+**1. Frontend** - `webmcp/bridge.ts` TOOL_MANIFEST'e JSON Schema ekle:
 
 ```ts
+// bridge.ts — TOOL_MANIFEST dizisine ekle
+{
+  name: 'getFlightDetails',
+  description: 'Bir ucusun detaylarini getir',
+  parameters: {
+    type: 'object',
+    properties: {
+      offerId: { type: 'string', description: 'Ucusun offer ID\'si' },
+    },
+    required: ['offerId'],
+  },
+},
+```
+
+**2. Frontend** - `webmcp/bridge.ts` handlers'a ekle:
+
+```ts
+// bridge.ts — handlers icine ekle
 getFlightDetails: async ({ offerId }) => {
   const flight = MOCK_FLIGHTS.find((f) => f.offerId === offerId);
   if (!flight) return { success: false, error: 'Ucus bulunamadi' };
   return {
     success: true,
-    flight,
-    priceFormatted: `₺${flight.price.toLocaleString('tr-TR')}`,
+    data: {
+      flight,
+      priceFormatted: `₺${flight.price.toLocaleString('tr-TR')}`,
+    },
   };
 },
 ```
 
-Baska hicbir degisiklik gerekmez. Agent artik bu tool'u kullanabilir.
+**Baska hicbir degisiklik gerekmez.** Backend kodu degismez — bir sonraki WebSocket baglantisininda yeni tool otomatik olarak kesfedilir ve agent tarafindan kullanilabilir hale gelir.
 
 ### 6. Backend Bridge: Async Future Pattern
 
@@ -587,16 +617,10 @@ def resolve(self, call_id: str, result: dict):
 Bu pattern sayesinde Agno Agent, tool sonucunu Python fonksiyon donus degeri gibi alir:
 
 ```python
-# tools/form_tools.py
-async def fill_search_form(origin="", destination="", ...) -> str:
-    params = {}
-    if origin: params["origin"] = origin.upper()
-    if destination: params["destination"] = destination.upper()
-
-    # Bu satir frontend'e gider, sonucu bekler, JSON doner
-    result = await bridge.call_frontend("fillSearchForm", params)
-
-    return json.dumps(result)  # → Agent'a metin olarak doner
+# tool_factory.py — her tool icin olusturulan proxy
+async def proxy_entrypoint(**kwargs) -> str:
+    result = await bridge.call_frontend(tool_name, kwargs)
+    return json.dumps(result, ensure_ascii=False)
 ```
 
 ---
@@ -658,7 +682,7 @@ WebMCP/
 │       ├── vite-env.d.ts
 │       │
 │       ├── types/
-│       │   └── index.ts          # Tum interface'ler (Flight, FormState, WebSocketMessage, ...)
+│       │   └── index.ts          # Tum interface'ler (Flight, FormState, ToolManifestEntry, WebSocketMessage, ...)
 │       │
 │       ├── data/
 │       │   └── constants.ts      # AIRPORTS(10), CABIN_CLASSES(3), MOCK_FLIGHTS(8)
@@ -673,8 +697,8 @@ WebMCP/
 │       │   └── useFieldHighlight.ts  # Agent degisikliklerini 1.2sn highlight
 │       │
 │       ├── webmcp/
-│       │   ├── bridge.ts             # createWebMCPBridge() → 14 tool handler
-│       │   └── useAgentConnection.ts # WebSocket hook: connect, reconnect, mesaj yonlendirme
+│       │   ├── bridge.ts             # TOOL_MANIFEST (14 JSON Schema) + createWebMCPBridge() (14 handler)
+│       │   └── useAgentConnection.ts # WebSocket hook: connect, manifest gonder, mesaj yonlendirme
 │       │
 │       └── components/
 │           ├── Header.tsx        # Nav tabs + baglanti gostergesi
@@ -688,15 +712,10 @@ WebMCP/
 ├── backend/
 │   ├── main.py                   # FastAPI app, CORS, /health, WS route, uvicorn
 │   ├── bridge.py                 # FrontendToolBridge sinifi + global instance
-│   ├── agent.py                  # Agno Agent: GPT-4o-mini, 12 tool, Turkce instructions
-│   ├── websocket_handler.py      # WS endpoint: mesaj dongusu + tool tanimlari
-│   ├── requirements.txt
-│   └── tools/
-│       ├── __init__.py           # ALL_TOOLS listesi olarak re-export
-│       ├── form_tools.py         # fill_search_form, clear_search_form, click_button
-│       ├── flight_tools.py       # search_flights, select_flight, add/remove_cart, get_cart
-│       ├── passenger_tools.py    # fill_passenger_form
-│       └── navigation_tools.py   # navigate_to, get_current_state, get_available_airports
+│   ├── agent.py                  # create_agent(tools) factory — per-connection agent
+│   ├── tool_factory.py           # Manifest → Agno Function proxy'leri (dinamik)
+│   ├── websocket_handler.py      # WS endpoint: handshake + mesaj dongusu
+│   └── requirements.txt
 │
 └── files/                        # Orijinal tek-dosya versiyonlari (arsiv)
     ├── backend-main.py
@@ -711,11 +730,13 @@ WebMCP/
 ### Backend
 ```bash
 cd backend
+python -m venv .venv
+source .venv/bin/activate
 pip install -r requirements.txt
 export OPENAI_API_KEY="sk-..."
 python main.py
 # → http://localhost:8000
-# → GET /health → {"status":"ok","agent":"SARP Travel Assistant","tools":12}
+# → GET /health → {"status":"ok","mode":"dynamic","description":"Agent created per WebSocket connection from frontend tool manifest"}
 ```
 
 ### Frontend
@@ -730,9 +751,12 @@ npm run dev
 1. Tarayicida `http://localhost:5173` ac
 2. Arama formu ve chat paneli gorunmeli
 3. Header'da yesil nokta: "Agent Bagli"
-4. Chat'e "Ankara Istanbul formu doldur" yaz → form alanlari dolmali + highlight efekti
-5. "Ara butonuna bas" yaz → sonuc listesi gorunmeli
-6. `npm run build` → TypeScript hatasiz build
+4. Tarayici konsolunda `[WebMCP] Backend registered 14 tools from manifest` mesaji
+5. Chat'e "Ankara Istanbul formu doldur" yaz → form alanlari dolmali + highlight efekti
+6. "Ara butonuna bas" yaz → sonuc listesi gorunmeli
+7. "En ucuzu sepete ekle" → sepete eklenmeli
+8. `npm run build` → TypeScript hatasiz build
+9. `GET /health` → `{"status":"ok","mode":"dynamic",...}`
 
 ---
 
@@ -762,14 +786,16 @@ Bridge ve store kodu degismez — sadece servis katmani degisir.
 # agent.py
 from agno.models.azure import AzureOpenAI
 
-agent = Agent(
-    model=AzureOpenAI(
-        id="gpt-4o",
-        azure_endpoint="https://your-resource.openai.azure.com/",
-        api_version="2024-02-15-preview",
-    ),
-    # ...geri kalan ayni
-)
+def create_agent(tools):
+    return Agent(
+        model=AzureOpenAI(
+            id="gpt-4o",
+            azure_endpoint="https://your-resource.openai.azure.com/",
+            api_version="2024-02-15-preview",
+        ),
+        tools=tools,
+        # ...geri kalan ayni
+    )
 ```
 
 ### Google WebMCP Standardi

@@ -1,7 +1,167 @@
 import type { AppStore } from '../store/useAppStore';
-import type { Flight, ViewType } from '../types';
+import type { Flight, ViewType, ToolManifestEntry } from '../types';
 import { AIRPORTS, CABIN_CLASSES, MOCK_FLIGHTS } from '../data/constants';
 import { flightService } from '../services/flightService';
+
+// ---------------------------------------------------------------------------
+// TOOL MANIFEST — Backend'e gönderilecek JSON Schema tanımları
+// setFormField hariç (düşük seviyeli, agent doğrudan kullanmaz)
+// ---------------------------------------------------------------------------
+export const TOOL_MANIFEST: ToolManifestEntry[] = [
+  {
+    name: 'fillSearchForm',
+    description: 'Arama formunu doldurur. Kalkış, varış, tarih, kabin sınıfı, yolcu sayısı ve yolculuk tipi alanlarını toplu olarak ayarlar.',
+    parameters: {
+      type: 'object',
+      properties: {
+        origin: { type: 'string', description: 'Kalkış havalimanı IATA kodu (ör: IST, ESB, AYT)' },
+        destination: { type: 'string', description: 'Varış havalimanı IATA kodu (ör: IST, ESB, AYT)' },
+        date: { type: 'string', description: 'Uçuş tarihi, YYYY-MM-DD formatında' },
+        cabinClass: { type: 'string', enum: ['economy', 'business', 'first'], description: 'Kabin sınıfı' },
+        passengers: { type: 'number', description: 'Yolcu sayısı (1-6)' },
+        tripType: { type: 'string', enum: ['one-way', 'round-trip'], description: 'Yolculuk tipi' },
+      },
+    },
+  },
+  {
+    name: 'clearSearchForm',
+    description: 'Arama formundaki tüm alanları temizler ve varsayılan değerlere sıfırlar.',
+    parameters: {
+      type: 'object',
+      properties: {},
+    },
+  },
+  {
+    name: 'submitSearchForm',
+    description: 'Mevcut form değerlerini kullanarak uçuş araması yapar. Önce fillSearchForm ile form doldurulmuş olmalı.',
+    parameters: {
+      type: 'object',
+      properties: {},
+    },
+  },
+  {
+    name: 'fillPassengerForm',
+    description: 'Yolcu bilgi formunu doldurur: ad, soyad, e-posta, telefon, TC kimlik no, doğum tarihi, cinsiyet.',
+    parameters: {
+      type: 'object',
+      properties: {
+        firstName: { type: 'string', description: 'Yolcu adı' },
+        lastName: { type: 'string', description: 'Yolcu soyadı' },
+        email: { type: 'string', description: 'E-posta adresi' },
+        phone: { type: 'string', description: 'Telefon numarası (en az 10 hane)' },
+        tcNo: { type: 'string', description: 'TC Kimlik Numarası (11 haneli)' },
+        birthDate: { type: 'string', description: 'Doğum tarihi, YYYY-MM-DD formatında' },
+        gender: { type: 'string', enum: ['male', 'female'], description: 'Cinsiyet' },
+      },
+    },
+  },
+  {
+    name: 'searchFlights',
+    description: 'Doğrudan uçuş araması yapar (form doldurmadan). Kalkış ve varış zorunlu.',
+    parameters: {
+      type: 'object',
+      properties: {
+        origin: { type: 'string', description: 'Kalkış havalimanı IATA kodu' },
+        destination: { type: 'string', description: 'Varış havalimanı IATA kodu' },
+        date: { type: 'string', description: 'Uçuş tarihi, YYYY-MM-DD formatında' },
+        cabinClass: { type: 'string', enum: ['economy', 'business', 'first'], description: 'Kabin sınıfı' },
+        passengers: { type: 'number', description: 'Yolcu sayısı (1-6)' },
+      },
+      required: ['origin', 'destination'],
+    },
+  },
+  {
+    name: 'selectFlight',
+    description: 'Bir uçuşu seçer/highlight eder. Arama sonuçlarından bir offerId gerekir.',
+    parameters: {
+      type: 'object',
+      properties: {
+        offerId: { type: 'string', description: 'Seçilecek uçuşun offer ID\'si (ör: OF-001)' },
+      },
+      required: ['offerId'],
+    },
+  },
+  {
+    name: 'addToCart',
+    description: 'Bir uçuşu sepete ekler. Aynı uçuş tekrar eklenemez.',
+    parameters: {
+      type: 'object',
+      properties: {
+        offerId: { type: 'string', description: 'Sepete eklenecek uçuşun offer ID\'si' },
+      },
+      required: ['offerId'],
+    },
+  },
+  {
+    name: 'removeFromCart',
+    description: 'Bir uçuşu sepetten çıkarır.',
+    parameters: {
+      type: 'object',
+      properties: {
+        offerId: { type: 'string', description: 'Sepetten çıkarılacak uçuşun offer ID\'si' },
+      },
+      required: ['offerId'],
+    },
+  },
+  {
+    name: 'getCart',
+    description: 'Sepet içeriğini, toplam tutarı ve ürün sayısını döndürür.',
+    parameters: {
+      type: 'object',
+      properties: {},
+    },
+  },
+  {
+    name: 'navigateTo',
+    description: 'Belirtilen sayfaya geçiş yapar.',
+    parameters: {
+      type: 'object',
+      properties: {
+        view: { type: 'string', enum: ['search', 'results', 'passenger', 'checkout'], description: 'Gidilecek sayfa' },
+      },
+      required: ['view'],
+    },
+  },
+  {
+    name: 'clickButton',
+    description: 'Sayfadaki bir butona tıklar. Geçerli butonlar: search-btn, clear-btn, back-to-search, proceed-to-passenger, proceed-to-checkout.',
+    parameters: {
+      type: 'object',
+      properties: {
+        buttonId: {
+          type: 'string',
+          enum: ['search-btn', 'clear-btn', 'back-to-search', 'proceed-to-passenger', 'proceed-to-checkout'],
+          description: 'Tıklanacak butonun ID\'si',
+        },
+      },
+      required: ['buttonId'],
+    },
+  },
+  {
+    name: 'getCurrentState',
+    description: 'Uygulamanın tam mevcut durumunu döndürür: form değerleri, yolcu bilgileri, arama sonuçları, sepet, seçili uçuş ve validasyon durumu.',
+    parameters: {
+      type: 'object',
+      properties: {},
+    },
+  },
+  {
+    name: 'getAvailableActions',
+    description: 'Mevcut sayfada yapılabilecek aksiyonları, her birinin etkin/devre dışı durumunu ve nedenini döndürür.',
+    parameters: {
+      type: 'object',
+      properties: {},
+    },
+  },
+  {
+    name: 'getAvailableAirports',
+    description: 'Sistemdeki tüm havalimanlarını IATA kodları ve isimleriyle listeler.',
+    parameters: {
+      type: 'object',
+      properties: {},
+    },
+  },
+];
 
 // ---------------------------------------------------------------------------
 // Standart tool cevap tipi

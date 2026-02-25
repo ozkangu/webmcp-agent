@@ -61,18 +61,23 @@ export interface PassengerFormState {
 
 export type ViewType = 'search' | 'results' | 'passenger' | 'checkout';
 
+export interface ToolManifestEntry {
+  name: string;
+  description: string;
+  parameters: {
+    type: 'object';
+    properties: Record<string, unknown>;
+    required?: string[];
+  };
+}
+
 export type WebSocketMessage =
-  | { type: 'connected'; tools: ToolDefinition[] }
+  | { type: 'connected' }
+  | { type: 'tools_registered'; count: number }
   | { type: 'tool_call'; callId: string; toolName: string; params: Record<string, unknown> }
   | { type: 'agent_thinking' }
   | { type: 'agent_response'; message: string }
   | { type: 'agent_error'; message: string };
-
-export interface ToolDefinition {
-  name: string;
-  description: string;
-  params?: string[];
-}
 
 export interface ToolCallMessage {
   type: 'tool_call';

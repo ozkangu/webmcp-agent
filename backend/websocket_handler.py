@@ -1,41 +1,44 @@
-"""WebSocket endpoint handler"""
+"""WebSocket endpoint handler — dynamic tool registration via frontend manifest"""
 
 from fastapi import WebSocket, WebSocketDisconnect
 from bridge import bridge
-from agent import agent
-
-# Tool tanımları - frontend'e bağlantıda gönderilir
-TOOL_DEFINITIONS = [
-    {"name": "fillSearchForm", "description": "Arama formunu doldur", "params": ["origin", "destination", "date", "cabinClass", "passengers", "tripType"]},
-    {"name": "clearSearchForm", "description": "Formu temizle"},
-    {"name": "clickButton", "description": "Butona tıkla", "params": ["buttonId"]},
-    {"name": "fillPassengerForm", "description": "Yolcu formunu doldur", "params": ["firstName", "lastName", "email", "phone", "tcNo", "birthDate", "gender"]},
-    {"name": "searchFlights", "description": "Uçuş ara", "params": ["origin", "destination", "date", "cabinClass"]},
-    {"name": "selectFlight", "description": "Uçuş seç", "params": ["offerId"]},
-    {"name": "addToCart", "description": "Sepete ekle", "params": ["offerId"]},
-    {"name": "removeFromCart", "description": "Sepetten çıkar", "params": ["offerId"]},
-    {"name": "getCart", "description": "Sepet bilgisi"},
-    {"name": "navigateTo", "description": "Sayfaya git", "params": ["view"]},
-    {"name": "getCurrentState", "description": "Mevcut durum (tam uçuş listesi, sepet, validasyon, available actions)"},
-    {"name": "getAvailableAirports", "description": "Havalimanı listesi"},
-    {"name": "getAvailableActions", "description": "Mevcut sayfada yapılabilecek aksiyonlar (enabled/disabled + sebep)"},
-]
+from agent import create_agent
+from tool_factory import create_tools_from_manifest
 
 
 async def websocket_agent(websocket: WebSocket):
     await websocket.accept()
     bridge.set_websocket(websocket)
 
-    await websocket.send_json({"type": "connected", "tools": TOOL_DEFINITIONS})
+    agent = None
+
+    # Frontend'e bağlantı onayı gönder — frontend tool_manifest ile cevap verecek
+    await websocket.send_json({"type": "connected"})
 
     try:
         while True:
             data = await websocket.receive_json()
 
-            if data.get("type") == "tool_result":
+            if data.get("type") == "tool_manifest":
+                manifest = data.get("tools", [])
+                tools = create_tools_from_manifest(manifest)
+                agent = create_agent(tools)
+                await websocket.send_json({
+                    "type": "tools_registered",
+                    "count": len(tools),
+                })
+
+            elif data.get("type") == "tool_result":
                 bridge.resolve(data["callId"], data["result"])
 
             elif data.get("type") == "user_message":
+                if agent is None:
+                    await websocket.send_json({
+                        "type": "agent_error",
+                        "message": "Agent henüz hazır değil. Tool manifest bekleniyor.",
+                    })
+                    continue
+
                 await websocket.send_json({"type": "agent_thinking"})
                 try:
                     response = await agent.arun(data["message"])
@@ -50,7 +53,9 @@ async def websocket_agent(websocket: WebSocket):
                     })
 
             elif data.get("type") == "user_action":
-                # Kullanıcının arayüzde yaptığı değişiklikleri agent context'ine aktar
+                if agent is None:
+                    continue
+
                 changes = data.get("changes", [])
                 if changes:
                     context_msg = "[Kullanıcı Aksiyonu] " + " | ".join(changes)
@@ -62,7 +67,6 @@ async def websocket_agent(websocket: WebSocket):
                                 "message": response.content,
                             })
                     except Exception:
-                        # User action bildirimi sessizce basarisiz olabilir
                         pass
 
     except WebSocketDisconnect:

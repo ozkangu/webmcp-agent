@@ -1,7 +1,7 @@
 import { useState, useRef, useCallback, useEffect } from 'react';
 import type { ChatMessage, WebSocketMessage, FormState, PassengerFormState } from '../types';
 import { useAppStore, type AppStore } from '../store/useAppStore';
-import { createWebMCPBridge, type WebMCPBridge } from './bridge';
+import { createWebMCPBridge, TOOL_MANIFEST, type WebMCPBridge } from './bridge';
 
 export function useAgentConnection() {
   const [messages, setMessages] = useState<ChatMessage[]>([
@@ -98,6 +98,12 @@ export function useAgentConnection() {
       switch (data.type) {
         case 'connected':
           bridgeRef.current = createWebMCPBridge(useAppStore.getState());
+          // Send tool manifest to backend for dynamic registration
+          ws.send(JSON.stringify({ type: 'tool_manifest', tools: TOOL_MANIFEST }));
+          break;
+
+        case 'tools_registered':
+          console.log(`[WebMCP] Backend registered ${data.count} tools from manifest`);
           break;
 
         case 'tool_call': {
